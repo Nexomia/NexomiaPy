@@ -1,9 +1,34 @@
 import requests, nexomiapy.debugger
+import websocket, _thread, time, json
+
 
 req = {
   'GET':requests.get,
   'POST':requests.post
 }
+
+class context:
+  def __init__(self,cid,uid,content,client) -> None:
+      '''
+      cid    => channel id,
+      uid    => user id,
+      client => client
+      '''
+      self.channel = channel(cid)
+      self.author = user(id=uid,client=client)
+      self.client = client
+      self.content = content
+  
+  def send(self,msg=''):
+    # http://nexo.fun/api/channels/{cid}/messages
+    data = {"content": str(msg)+' ⁽ᵇᵒᵗ⁾', "forwarded_messages": [], "attachments": []}
+    r = req["POST"](client._api+f"channels/{self.channel.id}/messages",  headers={'Authorization': self.client.token},data=data)
+    # Check r status
+    if r.status_code == 200 or r.status_code == 201:
+      # All good :)
+      print('returned:',r.json())
+    else:
+      nexomiapy.debugger.p(f"Got {r.status_code} which is not 200")
 
 class client:
   # Our API location
@@ -12,11 +37,54 @@ class client:
   def __init__(self,email,password,d=False):
     self._e = email
     self._p = password
+    self.prefix = '$'
+    self.commands = {}
     # Init the actual client
     self._tokens = self._get_token()
     # Ok now that we have the tokens, lets get user info
+    print('Got tokens...')
     self.own = user(token=self._tokens['access_token'])
+    self.token = self.own.token
+    print('Profile connected...')
+    self.ws = websocket.WebSocketApp("ws://ws.nexo.fun:7081?token="+self.own.token,
+      on_open=client.on_open,
+      on_message=self.on_message,
+      on_error=client.on_error,
+      on_close=client.on_close)
 
+  def run(self):
+    self.ws.run_forever()
+
+  # Handle commands here!
+  def command(self,func):
+    cmd = {
+      'args':func.__code__.co_varnames,
+      'code':func
+    }
+    self.commands[func.__name__] = cmd
+
+  # Web socket
+  def on_message(self, ws, message):
+    message = json.loads(message)
+    if message['event'] == 'message.created':
+      if message['data']['content'][0] == self.prefix:
+        cmd = message['data']['content'].strip().split(' ')[0].replace(self.prefix,'')
+        if cmd in self.commands:
+          print('Got a command!')
+          ctx = context(message['data']['channel_id'],message['data']['author'],message['data']['content'].strip(),self)
+          self.commands[cmd]['code'](ctx)
+
+  def on_error(ws, error):
+      print('Error:',error)
+
+  def on_close(ws, close_status_code, close_msg):
+      print("### closed ###",close_status_code, close_msg)
+
+  def on_open(ws):
+      print('Connected!')
+
+
+  # User stuff below
 
   def _get_token(self) -> dict:
     r = req["POST"](client._api+"auth/login", data={'login':self._e,'password':self._p})
@@ -27,35 +95,30 @@ class client:
     else:
       nexomiapy.debugger.p(f"Got {r.status_code} which is not 200")
 
+class channel:
+  def __init__(self,id,info=None,token=None):
+    
+    self.id =           id
+    
+    if info:
+      self.name =         info['name']
+      self.pinned =       info['pinned_messages_ids']
 
-class guild:
-  _api = "http://nexo.fun/api/"
-  def __init__(self,id,name,owner,client):
-    self.id = id
-    self.name = name
-    self.owner = owner
-    self.client = client
-    self.members = self._get_memebers()
+      # Permission overwrites can be blank, if thats the case it follows the general roles
+      self.perms =        info['permission_overwrites']
+    
+    if token: 
+      self.token =      token
+      self.messages =   self.get_messages()
+  
+  def __repr__(self) -> str:
+    return f"[{self.name}] -> {self.id}"
 
-  def __repr__(self):
-    return self.name + ' -> ' + str(self.id)
-
-  def _get_memebers(self) -> dict:
-    #http://nexo.fun/api/guilds/59375356258066432/members?
-    r = req["GET"](guild._api+"guilds/"+str(self.id)+'/members?', headers={'Authorization': self.client.token})
-    # Check r status
-    if r.status_code == 200 or r.status_code == 201:
-      # All good :)
-      # Process users
-      users = []
-      for u in r.json():
-        users.append(user(u['id'], server_info=u))
-      return users
-    else:
-      nexomiapy.debugger.p(f"Got {r.status_code} which is not 200")
-
-  def _get_channels(self) -> dict:
-    r = req["POST"](guild._api+"auth/login", data={'login':self._e,'password':self._p})
+  def get_messages(self,count=10,offset=0) -> dict:
+    '''
+    Gets the messages with given count, offset and own id.
+    '''
+    r = req["GET"](client._api+f"channels/{self.id}/messages?offset={offset}&count={count}", headers={'Authorization': self.token})
     # Check r status
     if r.status_code == 200 or r.status_code == 201:
       # All good :)
@@ -63,31 +126,67 @@ class guild:
     else:
       nexomiapy.debugger.p(f"Got {r.status_code} which is not 200")
 
+
+class guild:
+  _api = "http://nexo.fun/api/"
+  def __init__(self,id,client):
+    # http://nexo.fun/api/guilds/56394684022573056?
+
+    self.id =         id
+    rawr =            req["GET"](guild._api+"guilds/"+str(self.id)+'?', headers={'Authorization': client.token}).json()
+    self.name =       rawr['name']
+    self.owner =      rawr['owner_id']
+    self.client =     client
+    self.members =    self._get_members( rawr['members'] )
+    self.channels =   self._get_channels( rawr['channels'] )
+
+  def __repr__(self):
+    return self.name + ' -> ' + str(self.id)
+  
+  def _get_channels(self, channels):
+    chans = []
+    for chan in channels:
+      chans.append( channel( chan['id'], info=chan ) )
+    return chans
+
+  def _get_members(self, members) -> dict:
+    """
+    Allows the client to request members of a specified guild.
+    """
+    mems = []
+    for mem in members:
+      mems.append( user( mem['id'], server_perms=mem['permissions'], client=self.client ) )
+    return mems
+
+
 class user:
-  def __init__(self,id=0,token=None,server_info=None):
+  def __init__(self,id=0,token=None,server_perms=None,client=None):
 
     # If we have a token, we have ownership of the account!
     if token:
-      self.token = token
-      self.all = self._get_all(token)
-      self.id = self.all['id']
-      self.name = self.all['username']
-      self.disc = self.all['discriminator']
-      self.avatar = self.all['avatar']
-      self.status = self.all['status']
-      self.description = self.all['description']
-      self.emoji = self.all['emoji_packs']
-      self.guilds = self.get_guilds()
+      self.token =        token
+      self.all =          self._get_all(token)
+      self.id =           self.all['id']
+      self.name =         self.all['username']
+      self.disc =         self.all['discriminator']
+      self.avatar =       self.all['avatar']
+      self.status =       self.all['status']
+      self.description =  self.all['description']
+      self.emoji =        self.all['emoji_packs']
+      self.guilds =       self.get_guilds()
     elif id:
       # If we dont get a token, assume we are requesting general info
       self.id = id
+      inf = self._get_user(id,client.token)
+      self.id =          inf['id']
+      self.name =        inf['username']
+      self.disc =        inf['discriminator']
+      self.avatar =      inf['avatar']
+      self.status =      inf['status']
+      self.description = inf['description']
     # For servers )))
-    if server_info:
-      self.permissions = server_info['permissions']
-      self.name = server_info['user']['username']
-      self.disc = server_info['user']['discriminator']
-      self.avatar = server_info['user']['avatar']
-      self.status = server_info['user']['status']
+    if server_perms:
+      self.permissions = server_perms
   
   def __repr__(self) -> str:
     return f"({self.name}#{self.disc}) -> {self.id} || {self.status}"
@@ -100,6 +199,16 @@ class user:
       return r.json()
     else:
       nexomiapy.debugger.p(f"Got {r.status_code} which is not 200 when trying to get user data")
+    
+  def _get_user(self,id,token) -> dict:
+    r = req["GET"](client._api+f"users/{id}", headers={'Authorization': token})
+    # Check r status
+    if r.status_code == 200 or r.status_code == 201:
+      # All good :)
+      return r.json()
+    else:
+      nexomiapy.debugger.p(f"Got {r.status_code} which is not 200 when trying to get user data")
+
   
   def get_guilds(self) -> guild:
     # http://nexo.fun/api/users/@me/guilds?
@@ -110,7 +219,7 @@ class user:
       # Process our guilds
       guilds = []
       for g in r.json():
-        guilds.append(guild(g['id'],g['name'],g['owner_id'],self))
+        guilds.append(guild(g['id'],self))
       return guilds
     else:
       nexomiapy.debugger.p(f"Got {r.status_code} which is not 200 when trying to get user data")
