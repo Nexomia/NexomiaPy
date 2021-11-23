@@ -8,7 +8,7 @@ req = {
 }
 
 class context:
-  def __init__(self,cid,uid,content,client) -> None:
+  def __init__(self,cid,uid,content,client,type='msg') -> None:
       '''
       cid    => channel id,
       uid    => user id,
@@ -18,10 +18,14 @@ class context:
       self.author = user(id=uid,client=client)
       self.client = client
       self.content = content
+      self.type = type
   
   def send(self,msg=''):
     # http://nexo.fun/api/channels/{cid}/messages
-    data = {"content": str(msg)+' ⁽ᵇᵒᵗ⁾', "forwarded_messages": [], "attachments": []}
+    if self.client.type == 'client':
+      data = {"content": str(msg), "forwarded_messages": [], "attachments": []}
+    else:
+      data = {"content": str(msg)+' ⁽ᵇᵒᵗ⁾', "forwarded_messages": [], "attachments": []}
     r = req["POST"](client._api+f"channels/{self.channel.id}/messages",  headers={'Authorization': self.client.token},data=data)
     # Check r status
     if r.status_code == 200 or r.status_code == 201:
@@ -34,11 +38,12 @@ class client:
   # Our API location
   _api = "http://nexo.fun/api/"
   
-  def __init__(self,email,password,d=False):
+  def __init__(self,email,password,d=False,c=False):
     self._e = email
     self._p = password
     self.prefix = '$'
     self.commands = {}
+    self.events = {} 
     # Init the actual client
     self._tokens = self._get_token()
     # Ok now that we have the tokens, lets get user info
@@ -46,7 +51,16 @@ class client:
     self.own = user(token=self._tokens['access_token'])
     self.token = self.own.token
     print('Profile connected...')
-    self.ws = websocket.WebSocketApp("ws://ws.nexo.fun:7081?token="+self.own.token,
+    if not c:
+      self.ws = websocket.WebSocketApp("ws://ws.nexo.fun:7081?token="+self.own.token,
+      on_open=client.on_open,
+      on_message=self.on_message,
+      on_error=client.on_error,
+      on_close=client.on_close)
+      self.type = 'bot'
+    else:
+      self.type = 'client'
+      self.ws = websocket.WebSocketApp("ws://ws.nexo.fun:7081?token="+self.own.token,
       on_open=client.on_open,
       on_message=self.on_message,
       on_error=client.on_error,
@@ -62,10 +76,22 @@ class client:
       'code':func
     }
     self.commands[func.__name__] = cmd
+  
+  def handleEvent(self,func):
+    cmd = {
+      'args':func.__code__.co_varnames,
+      'code':func
+    }
+    self.events['on_message'] = cmd
 
   # Web socket
   def on_message(self, ws, message):
     message = json.loads(message)
+    print(message)
+    if 'on_message' in self.commands:
+      if message['event'] == 'message.created':
+        ctx = context(message['data']['channel_id'],message['data']['author'],message['data']['content'].strip(),self,type='msg')
+        self.commands['on_message']['code'](ctx)
     if message['event'] == 'message.created':
       if message['data']['content'][0] == self.prefix:
         cmd = message['data']['content'].strip().split(' ')[0].replace(self.prefix,'')
@@ -73,6 +99,12 @@ class client:
           print('Got a command!')
           ctx = context(message['data']['channel_id'],message['data']['author'],message['data']['content'].strip(),self)
           self.commands[cmd]['code'](ctx)
+  
+  def on_message_client(self,ws,message):
+    message = json.loads(message)
+    print(message)
+    self.events['on_message']['code'](message)
+
 
   def on_error(ws, error):
       print('Error:',error)
@@ -98,33 +130,41 @@ class client:
 class channel:
   def __init__(self,id,info=None,token=None):
     
-    self.id =           id
+    self.id =            id
+    self.name =          None
     
     if info:
-      self.name =         info['name']
-      self.pinned =       info['pinned_messages_ids']
+      self.name =        info['name']
+      self.pinned =      info['pinned_messages_ids']
 
       # Permission overwrites can be blank, if thats the case it follows the general roles
-      self.perms =        info['permission_overwrites']
+      self.perms =       info['permission_overwrites']
     
     if token: 
-      self.token =      token
-      self.messages =   self.get_messages()
+      self.token =       token
+      self.messages =    self.get_history()
   
   def __repr__(self) -> str:
-    return f"[{self.name}] -> {self.id}"
+    if self.name != None:
+      return f"[{self.name}] -> {self.id}"
+    else:
+      return f"[Uninitialized Channel] -> {self.id}"
 
-  def get_messages(self,count=10,offset=0) -> dict:
+  def get_history(self,count=10,offset=0,token='') -> dict:
     '''
     Gets the messages with given count, offset and own id.
     '''
-    r = req["GET"](client._api+f"channels/{self.id}/messages?offset={offset}&count={count}", headers={'Authorization': self.token})
+    if token:
+      r = req["GET"](client._api+f"channels/{self.id}/messages?offset={offset}&count={count}", headers={'Authorization': token})
+    else:
+      r = req["GET"](client._api+f"channels/{self.id}/messages?offset={offset}&count={count}", headers={'Authorization': self.token})
     # Check r status
     if r.status_code == 200 or r.status_code == 201:
       # All good :)
       return r.json()
     else:
       nexomiapy.debugger.p(f"Got {r.status_code} which is not 200")
+
 
 
 class guild:
@@ -139,6 +179,8 @@ class guild:
     self.client =     client
     self.members =    self._get_members( rawr['members'] )
     self.channels =   self._get_channels( rawr['channels'] )
+    # Client only!
+    self.unread =     False
 
   def __repr__(self):
     return self.name + ' -> ' + str(self.id)
