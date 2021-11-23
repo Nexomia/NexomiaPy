@@ -12,8 +12,11 @@ class context:
       '''
       cid    => channel id,
       uid    => user id,
-      client => client
+      client => client (must not be None!)
       '''
+      if client == None:
+        raise Exception("Failed! Client must not be None!")
+        exit()
       self.channel = channel(cid)
       self.author = user(id=uid,client=client)
       self.client = client
@@ -114,6 +117,9 @@ class client:
 
   def on_open(ws):
       print('Connected!')
+  
+  def kill(self):
+      quit()
 
 
   # User stuff below
@@ -142,15 +148,14 @@ class channel:
     
     if token: 
       self.token =       token
-      self.messages =    self.get_history()
-  
+
   def __repr__(self) -> str:
     if self.name != None:
       return f"[{self.name}] -> {self.id}"
     else:
       return f"[Uninitialized Channel] -> {self.id}"
 
-  def get_history(self,count=10,offset=0,token='') -> dict:
+  def get_history(self,count=10,offset=0,token='',cl=None) -> dict:
     '''
     Gets the messages with given count, offset and own id.
     '''
@@ -161,7 +166,10 @@ class channel:
     # Check r status
     if r.status_code == 200 or r.status_code == 201:
       # All good :)
-      return r.json()
+      msgs = []
+      for msg in r.json():
+        msgs.append( context(msg['channel_id'],msg['author'],msg['content'],cl) )
+      return msgs
     else:
       nexomiapy.debugger.p(f"Got {r.status_code} which is not 200")
 

@@ -5,7 +5,6 @@ import threading
 import time
 
 env = json.load(open(".env",'r'))
-
 client = nexomiapy.client(env['email'],env['password'],c=True)
 client.prefix=''
 x = threading.Thread( target=client.run )
@@ -18,7 +17,7 @@ class page:
         self.header = header
         self.messagesource = messagesource
 
-def draw_menu(stdscr):
+def draw_menu(stdscr,client):
     k = 0
     cursor_x = 0
     cursor_y = 0
@@ -27,6 +26,12 @@ def draw_menu(stdscr):
     stdscr.clear()
     stdscr.refresh()
     stdscr.nodelay(True)
+    stdscr.attron(curses.color_pair(2))
+    stdscr.attron(curses.A_BOLD)
+    stdscr.addstr(1,1, "Loading....")
+    stdscr.attroff(curses.color_pair(2))
+    stdscr.attroff(curses.A_BOLD)
+      
 
     # Start colors in curses
     curses.start_color()
@@ -41,9 +46,10 @@ def draw_menu(stdscr):
     messages = {}
     help=False
     cur_guild= None
+    height, width = stdscr.getmaxyx()
     for guild in bot.guilds:
-        messages[guild.channels[0].id] = [guild.channels[0].get_history(token=bot.token)]
-        print(guild.channels[0].get_history(token=bot.token))
+        messages[guild.channels[0].id] = [guild.channels[0].get_history(count=height-20,token=bot.token,cl=client)]
+        print(messages[guild.channels[0].id])
 
     # Loop where k is the last character pressed
     while True:
@@ -95,6 +101,8 @@ def draw_menu(stdscr):
             # Exiting? :(
             if k == ord('q'):
                 state=''
+                # Kill the client first!
+                client.kill()
                 quit()
             # Input?
             if k == ord('i') and path != 'home':
@@ -115,6 +123,7 @@ def draw_menu(stdscr):
                 state='Command'
         # hard quit
         if k == 27:
+            client.kill()
             quit()
 
         if help:
@@ -160,8 +169,9 @@ def draw_menu(stdscr):
             chatbox.addstr(1, 2, cur_page.header)
             # Handle messages to CLI
             sp = 0
-            for i,message in enumerate(messages[cur_guild.channels[0].id]):
+            for i,message in enumerate(messages[cur_guild.channels[0].id][0]):
                 try:
+                    print(message.content)
                     if len(message.content) < width-23:
                         chatbox.addstr(3+i+sp,2, message.author.name+' - '+message.content)
                     else:
@@ -171,12 +181,17 @@ def draw_menu(stdscr):
                         for o,r in enumerate(x):
                             chatbox.addstr(3+i+o,2, len(message.author.name)*' '+' - '+r)
                         sp+=len(x)
-                except:
-                    # We probably ran out of space! Scroll!... (or well just clean it ;) )
+                except Exception as e:
+                    # We probably ran out of space! Scroll!... (or we'll just clean it ;) )
+                    #del messages[cur_guild.channels[0].id][0][0]
                     chatbox.erase() 
                     chatbox.refresh()
-                if i > 10:
-                    break
+                    # Unless...
+                    print(print(message),e)
+                    chatbox.addstr(3+i+sp,2, f"[Cursed] - Failed to append message {e} {message}")
+                    s = e
+                if i > height-10:
+                    del messages[cur_guild.channels[0].id][0][0]
         #stdscr.addstr(start_y + 5, start_x_keystr, keystr)
         stdscr.move(cursor_y, cursor_x)
 
@@ -186,14 +201,14 @@ def draw_menu(stdscr):
             try:
                 if cur_guild != None:
                     if ctx.channel.id == cur_guild.channels[0].id:
-                        messages[ctx.channel.id].append(ctx)
+                        messages[ctx.channel.id][0].append(ctx)
                     else:
                         # ctx.send(f"Target: {ctx.channel.id} | Act Target: {cur_guild.channels[0].id}")
-                        # Notify user of unread messa
+                        # Notify user of unread messages
                         for i, guild in enumerate(bot.guilds):
                             if str(ctx.channel.id) in [channel.id for channel in guild.channels]:
                                 bot.guilds[i].unread = True
-                                messages[ctx.channel.id].append(ctx)
+                                messages[ctx.channel.id][0].append(ctx)
             except Exception as e:
                 ctx.send(f"{e}")
                 
@@ -212,9 +227,14 @@ def draw_menu(stdscr):
         #stdscr.addstr(0, 0, whstr, curses.color_pair(1))
 
         # Render status bar
+        
         stdscr.attron(curses.color_pair(3))
-        stdscr.addstr(height-1, 0, statusbarstr)
-        stdscr.addstr(height-1, len(statusbarstr), " " * (width - len(statusbarstr) - 1))
+        try:
+            stdscr.addstr(height-1, 0, statusbarstr)
+            stdscr.addstr(height-1, len(statusbarstr), " " * (width - len(statusbarstr) - 1))
+        except Exception as e:
+            stdscr.addstr(height-1, 0, str(e))
+            stdscr.addstr(height-1, len(str(e)), " " * (width - len(str(e)) - 1))
         stdscr.attroff(curses.color_pair(3))
 
 
@@ -237,9 +257,9 @@ def draw_menu(stdscr):
         time.sleep(0.1)
     #x.join()
 
-def main():
+def main(c):
     x.start()
-    curses.wrapper(draw_menu)
+    curses.wrapper(draw_menu,c)
 
 if __name__ == "__main__":
-    main()
+    main(client)
